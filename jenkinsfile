@@ -1,0 +1,141 @@
+pipeline {
+ agent none
+ options {  
+     timeout(time: 10, unit: 'MINUTES') 
+ }
+ parameters {
+   booleanParam(name: 'UNITTEST', defaultValue: true, description: 'Enable UnitTest ?')
+   booleanParam(name: 'CODEANALYSIS', defaultValue: true, description: 'Enaable CODE-ANALYSIS ?')
+}
+
+ 
+ stages
+ {
+  stage('Checkout')
+  {
+  agent { label 'test' }
+   steps { 
+    git branch: 'master', url: 'https://gitlab.com/ajaysahoo/cicd_project.git'
+   }
+  }
+
+stage('Build Artifacts')
+{
+  agent { label 'test'}
+  steps {
+    script {
+           if (params.UNITTEST) {
+               unitstr = ""
+             } else {
+                 unitstr = "-Dmaven.test.skip=true"
+                 }
+             echo "Building jar component ..."
+             dir ("./samplejar") {
+                 sh "mvn clean package ${unitstr}"
+              }
+             echo "Building war component ..."
+             dir ("./samplewar") {
+                sh "mvn clean package"
+              }
+         }
+  }
+  
+ }
+  stage('code coverage')
+{
+agent {label 'test'}
+when {
+  expression { return params.CODEANALYSIS }
+
+}
+steps {
+  echo "Running code Coverage ..."
+     dir ("./samplejar") {
+     sh "mvn org.jacoco:jacoco-maven-plugin:0.5.5.201112152213:prepare-agent"
+}
+}
+}
+
+
+stage('SonarQube Analysis')
+{
+agent { label 'test' }
+steps{
+  withSonarQubeEnv('mysonarqube') {
+   dir ("./samplejar") {
+   sh 'mvn sonar:sonar'
+}
+}
+}
+}
+
+stage("Quality Gate") {
+steps{
+ script {
+   timeout(time: 1, unit: 'HOURS') {   //just in case something goes wrong,pipeline will be killed after a timeout
+    def qq = waitForQualityGate() //reuse taskID previously collected by withSonarQubeENV
+     if (qq.status != 'OK') {
+       error "pipeline aborted due to quality gate failure: ${qq.status}"
+        }
+    }
+   }
+  }
+ }
+ }
+ }
+ 
+ stage('Upload Artifactory') 
+  {          
+   agent { label 'test' }
+   steps {          
+    script { 
+	    /* Define the Artifactory Server details */
+        def server = Artifactory.server 'myartifactory'
+        def uploadSpec = """{
+            "files": [{
+            "pattern": "sample/target/samplejar-1.0-SNAPSHOT.war", 
+            "target": "demo"                   
+            }]
+        }"""
+        
+        /* Upload the war to  Artifactory repo */
+        server.upload(uploadSpec)
+    }
+   }
+  }
+stage('Build Image')
+{
+agent { label 'test'}
+steps{
+  script {
+       docker.withRegistry( 'https://registry.hub.docker.com', 'dockerhub' ) {
+/* Build docker image locally */
+    sh 'sudo bash'
+    myImage = docker.build("ajaykumar143/cicdimg:latest")
+/*push the container to the registry */
+     myImage.push()
+}
+}
+}
+}
+stage('Deploy')
+{
+  agent { label 'deploy'}
+  steps {
+    echo "Checkout Deployment configuration file .."
+    git branch: 'master', url: 'https://gitlab.com/ajaysahoo/cicd_project.git'
+    script {
+       kubernetesDeploy(kubeconfigId: 'kubernetes', configs: 'Deployment.yml')
+
+   }
+  }
+}
+stage ('Smoke Test')
+ {
+  agent{ label 'test'}
+  steps{
+     sh "chmod +x runsanity.sh; ./runsanity.sh ajaykumar143/cicdimg:latest"
+	 }
+  }
+ }
+ }
